@@ -1,0 +1,34 @@
+flowchart TB
+    Internet((Internet))
+    IGW[Internet Gateway]
+
+    subgraph VPC["NimbusTech VPC 10.20.0.0/16"]
+      subgraph AZ1["AZ 1"]
+        P1[Public Subnet\n10.20.1.0/24]
+        A1[Private App Subnet\n10.20.11.0/24]
+        D1[Private DB Subnet\n10.20.21.0/24]
+        N1[NAT Gateway]
+      end
+      subgraph AZ2["AZ 2"]
+        P2[Public Subnet\n10.20.2.0/24]
+        A2[Private App Subnet\n10.20.12.0/24]
+        D2[Private DB Subnet\n10.20.22.0/24]
+        N2[NAT Gateway]
+      end
+
+      ALB[Public Application Load Balancer]
+      ASG[EC2 Auto Scaling Group\nNode.js API]
+      RDS[(RDS PostgreSQL\nMulti-AZ)]
+    end
+
+    Internet --> IGW --> ALB
+    ALB --> ASG
+    ASG --> RDS
+    A1 --> N1 --> IGW
+    A2 --> N2 --> IGW
+    ALB -. public subnets .- P1
+    ALB -. public subnets .- P2
+    ASG -. private subnets .- A1
+    ASG -. private subnets .- A2
+    RDS -. isolated DB subnets .- D1
+    RDS -. isolated DB subnets .- D2
