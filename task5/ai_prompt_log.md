@@ -6,49 +6,83 @@
 
 ## Raw AI output
 
-The initial AI-generated baseline was intentionally simple:
+The initial AI-generated baseline was:
 
 ```python
 import boto3
+
 from datetime import datetime, timedelta, timezone
 
 session = boto3.Session()
+
 cutoff = datetime.now(timezone.utc) - timedelta(days=7)
 
-regions = [r["RegionName"] for r in session.client("ec2", region_name="us-east-1").describe_regions()["Regions"]]
+regions = [
+    r["RegionName"]
+    for r in session.client(
+        "ec2",
+        region_name="us-east-1"
+    ).describe_regions()["Regions"]
+]
 
 for region in regions:
-    ec2 = session.client("ec2", region_name=region)
-    sns = session.client("sns", region_name=region)
-    response = ec2.describe_instances(
-        Filters=[{"Name": "instance-state-name", "Values": ["running"]}]
-    )
-    for reservation in response["Reservations"]:
-        for instance in reservation["Instances"]:
-            tags = {t["Key"]: t["Value"] for t in instance.get("Tags", [])}
-            if "Name" not in tags and instance["LaunchTime"] < cutoff:
-                message = f"Stopping {instance['InstanceId']} in {region}"
-                sns.publish(TopicArn="REPLACE_ME", Message=message)
-                ec2.stop_instances(InstanceIds=[instance["InstanceId"]])
-```
 
+    ec2 = session.client("ec2", region_name=region)
+
+    response = ec2.describe_instances(
+        Filters=[
+            {
+                "Name": "instance-state-name",
+                "Values": ["running"]
+            }
+        ]
+    )
+
+    for reservation in response["Reservations"]:
+
+        for instance in reservation["Instances"]:
+
+            tags = {
+                t["Key"]: t["Value"]
+                for t in instance.get("Tags", [])
+            }
+
+            if "Name" not in tags and instance["LaunchTime"] < cutoff:
+
+                message = f"Stopping {instance['InstanceId']} in {region}"
+
+                print(message)
+
+                ec2.stop_instances(
+                    InstanceIds=[instance["InstanceId"]]
+                )
 ## What the AI got right
 
-- It used UTC-aware time comparison.
-- It filtered for running instances and checked the `Name` tag.
-- It iterated across AWS regions.
-- It sent an SNS notification before stopping.
+It used boto3 to work with AWS.
+It used UTC-aware datetime values.
+It discovered enabled AWS regions.
+It filtered for running EC2 instances.
+It checked whether the instance had a Name tag.
+It checked whether the instance had been running for more than 7 days.
+It used stop_instances() to stop the matching EC2 instances.
 
 ## What was wrong/incomplete
-
-- It did not use paginators, so a large fleet could be truncated.
-- It assumed the SNS topic is in the same region as the EC2 instance.
-- It hard-coded the topic ARN placeholder.
-- It had no dry-run safety switch.
-- It stopped an instance without checking whether the SNS publish succeeded.
-- It did not handle AWS API errors.
-- It did not explicitly support an override list of regions.
+It did not send an SNS notification before stopping the instance.
+It did not check whether the SNS notification was successfully sent.
+It did not have a dry-run option.
+It did not include useful information such as the region and reason in the SNS notification.
+It did not have basic AWS error handling.
+It could stop an instance immediately if the script was run accidentally.
+It used a simple describe_instances() call instead of a paginator, which may not be suitable for a large number of instances.
 
 ## Changes made in the final version
 
-The final `ec2_cleanup.py` adds paginators, CLI arguments, all-enabled-region discovery, cross-region SNS client handling, dry-run-by-default behavior, structured alert content, exception handling, and the safety rule that a stop occurs only after a successful SNS publish.
+Checks all enabled AWS regions.
+Finds running EC2 instances.
+Checks whether an instance has a Name tag.
+Checks whether the instance is older than 7 days.
+Sends an SNS notification before stopping the instance.
+Uses a simple DRY_RUN setting.
+Does not stop instances when dry-run mode is enabled.
+Prints the instances found during the scan.
+Keeps the code simple so that each step is easy to explain.

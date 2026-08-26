@@ -1,119 +1,89 @@
 #!/usr/bin/env python3
-"""Find unnamed EC2 instances older than 7 days in every enabled region.
-
-Default is a dry run. With --execute, the script sends an SNS alert first and
-stops only instances for which the SNS publish succeeded.
-"""
-
-import argparse
-import json
-from datetime import datetime, timedelta, timezone
-from typing import Iterable
 
 import boto3
-from botocore.exceptions import BotoCoreError, ClientError
+from datetime import datetime, timedelta, timezone
+
+# SNS topic
+SNS_TOPIC_ARN = "arn:aws:sns:us-east-1:123456789012:nimbustech-alerts"
+
+# Instances older than 7 days
+CUTOFF_DATE = datetime.now(timezone.utc) - timedelta(days=7)
+
+# Create AWS session
+session = boto3.Session()
+
+# Get all enabled AWS regions
+ec2 = session.client("ec2", region_name="us-east-1")
+
+regions = ec2.describe_regions()["Regions"]
+
+sns = session.client("sns", region_name="us-east-1")
 
 
-def regions_for(session) -> list[str]:
-    ec2 = session.client("ec2", region_name="us-east-1")
-    response = ec2.describe_regions(AllRegions=False)
-    return sorted(r["RegionName"] for r in response["Regions"])
+for region_data in regions:
 
+    region = region_data["RegionName"]
 
-def instance_name(instance: dict) -> str | None:
-    for tag in instance.get("Tags", []):
-        if tag["Key"] == "Name":
-            return tag["Value"]
-    return None
+    print("\nChecking region:", region)
 
+    ec2 = session.client("ec2", region_name=region)
 
-def candidates(ec2, cutoff: datetime) -> list[dict]:
-    paginator = ec2.get_paginator("describe_instances")
-    found = []
-    for page in paginator.paginate(
-        Filters=[{"Name": "instance-state-name", "Values": ["running"]}]
-    ):
-        for reservation in page["Reservations"]:
-            for instance in reservation["Instances"]:
-                if instance_name(instance):
-                    continue
-                if instance["LaunchTime"] < cutoff:
-                    found.append(instance)
-    return found
+    response = ec2.describe_instances(
+        Filters=[
+            {
+                "Name": "instance-state-name",
+                "Values": ["running"]
+            }
+        ]
+    )
 
+    for reservation in response["Reservations"]:
 
-def sns_client_from_topic(session, topic_arn: str):
-    topic_region = topic_arn.split(":")[3]
-    return session.client("sns", region_name=topic_region)
+        for instance in reservation["Instances"]:
 
+            instance_id = instance["InstanceId"]
+            launch_time = instance["LaunchTime"]
 
-def alert(sns, topic_arn: str, region: str, instance: dict, age_days: float, execute: bool) -> bool:
-    message = {
-        "event": "NimbusTech EC2 cleanup candidate",
-        "action": "stop" if execute else "dry-run",
-        "region": region,
-        "instance_id": instance["InstanceId"],
-        "instance_type": instance.get("InstanceType"),
-        "launch_time": instance["LaunchTime"].isoformat(),
-        "age_days": round(age_days, 1),
-        "reason": "running for more than 7 days and has no Name tag",
-    }
-    try:
-        sns.publish(
-            TopicArn=topic_arn,
-            Subject="NimbusTech unnamed EC2 cleanup candidate",
-            Message=json.dumps(message, indent=2),
-        )
-        return True
-    except (BotoCoreError, ClientError) as exc:
-        print(f"SNS publish failed for {instance['InstanceId']}: {exc}")
-        return False
+            # Check if instance has a Name tag
+            has_name = False
 
+            for tag in instance.get("Tags", []):
+                if tag["Key"] == "Name":
+                    has_name = True
 
-def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--topic-arn", required=True, help="SNS topic ARN used for alerts")
-    parser.add_argument("--age-days", type=int, default=7)
-    parser.add_argument("--execute", action="store_true", help="Send alerts and stop instances")
-    parser.add_argument("--regions", nargs="*", help="Optional region override; default is all enabled regions")
-    args = parser.parse_args()
-
-    session = boto3.Session()
-    regions = args.regions or regions_for(session)
-    cutoff = datetime.now(timezone.utc) - timedelta(days=args.age_days)
-    sns = sns_client_from_topic(session, args.topic_arn)
-    total = 0
-
-    for region in regions:
-        ec2 = session.client("ec2", region_name=region)
-        try:
-            found = candidates(ec2, cutoff)
-        except (BotoCoreError, ClientError) as exc:
-            print(f"{region}: discovery failed: {exc}")
-            continue
-
-        for instance in found:
-            age_days = (datetime.now(timezone.utc) - instance["LaunchTime"]).total_seconds() / 86400
-            print(f"Candidate: {region} {instance['InstanceId']} age={age_days:.1f}d")
-            total += 1
-
-            if not args.execute:
+            # Skip instances that have a Name tag
+            if has_name:
                 continue
 
-            if not alert(sns, args.topic_arn, region, instance, age_days, execute=True):
-                print(f"Skipping stop because SNS alert failed: {instance['InstanceId']}")
-                continue
+            # Check if instance is older than 7 days
+            if launch_time < CUTOFF_DATE:
 
-            try:
-                ec2.stop_instances(InstanceIds=[instance["InstanceId"]])
-                print(f"Stopped: {region} {instance['InstanceId']}")
-            except (BotoCoreError, ClientError) as exc:
-                print(f"Stop failed for {instance['InstanceId']}: {exc}")
+                print(
+                    "Found instance:",
+                    instance_id,
+                    "in",
+                    region
+                )
 
-    mode = "EXECUTE" if args.execute else "DRY RUN"
-    print(f"{mode}: {total} candidate instance(s) found.")
-    return 0
+                # Send SNS alert
+                message = (
+                    f"EC2 instance {instance_id} in {region} "
+                    "has been running for more than 7 days "
+                    "and does not have a Name tag. "
+                    "The instance will be stopped."
+                )
 
+                sns.publish(
+                    TopicArn=SNS_TOPIC_ARN,
+                    Subject="NimbusTech EC2 Cleanup Alert",
+                    Message=message
+                )
 
-if __name__ == "__main__":
-    raise SystemExit(main())
+                print("SNS alert sent.")
+
+                # Stop the instance
+                ec2.stop_instances(
+                    InstanceIds=[instance_id]
+                )
+
+                print("Instance stopped:", instance_id)

@@ -1,0 +1,36 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: NimbusTech billing alarm at USD 350
+Parameters:
+  AlertEmail:
+    Type: String
+    Description: Email address for billing alerts
+Resources:
+  BillingTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: nimbustech-billing-alerts
+  BillingSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref BillingTopic
+      Protocol: email
+      Endpoint: !Ref AlertEmail
+  BillingAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: nimbustech-monthly-billing-over-350
+      AlarmDescription: Alert when estimated monthly AWS charges reach USD 350
+      Namespace: AWS/Billing
+      MetricName: EstimatedCharges
+      Dimensions:
+        - Name: Currency
+          Value: USD
+      Statistic: Maximum
+      Period: 21600
+      EvaluationPeriods: 1
+      Threshold: 350
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: [!Ref BillingTopic]
+Outputs:
+  BillingAlarmName: {Value: !Ref BillingAlarm}

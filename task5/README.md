@@ -1,54 +1,124 @@
-# Task 5 — AI-Assisted Automation
+# Task 5 — AI Prompt Log
 
-## Chosen mini-task
+## Chosen Mini-Task
 
-Option A: find unnamed EC2 instances across all regions that have been running for more than seven days, alert via SNS, then stop them.
+**Option A:** Find unnamed EC2 instances across all enabled AWS regions that have been running for more than seven days, send an SNS alert, and stop them.
 
-## Usage
+The exercise specifically asks to show the AI prompt, the raw AI output, and what was changed after reviewing the AI-generated code.
 
-Install dependencies:
+---
 
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+## Prompt Used
+
+> Act as an AWS Cloud Engineer. For the NimbusTech hiring exercise, write a simple Python 3 script using boto3 that finds all running EC2 instances across all enabled AWS regions. The script should find instances that have been running for more than 7 days and do not have a Name tag. Before stopping an instance, send an SNS notification containing the region and instance ID. Keep the code simple and easy to understand because I need to explain it in an interview. Add a simple dry-run option so instances are not accidentally stopped while testing. Use basic exception handling where appropriate.
+
+---
+
+## Raw AI Output
+
+The initial AI-generated code was similar to the following:
+
+```python
+import boto3
+
+from datetime import datetime, timedelta, timezone
+
+session = boto3.Session()
+
+cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+
+regions = [
+    r["RegionName"]
+    for r in session.client(
+        "ec2",
+        region_name="us-east-1"
+    ).describe_regions()["Regions"]
+]
+
+for region in regions:
+
+    ec2 = session.client("ec2", region_name=region)
+
+    response = ec2.describe_instances(
+        Filters=[
+            {
+                "Name": "instance-state-name",
+                "Values": ["running"]
+            }
+        ]
+    )
+
+    for reservation in response["Reservations"]:
+
+        for instance in reservation["Instances"]:
+
+            tags = {
+                t["Key"]: t["Value"]
+                for t in instance.get("Tags", [])
+            }
+
+            if "Name" not in tags and instance["LaunchTime"] < cutoff:
+
+                print(
+                    "Found instance:",
+                    instance["InstanceId"]
+                )
+
+                ec2.stop_instances(
+                    InstanceIds=[instance["InstanceId"]]
+                )
 ```
 
-Dry run (recommended first):
+---
 
-```bash
-python3 ec2_cleanup.py --topic-arn arn:aws:sns:us-east-1:123456789012:nimbus-ec2-alerts
-```
+## What the AI Got Right
 
-Execute:
+The initial code correctly:
 
-```bash
-python3 ec2_cleanup.py \
-  --topic-arn arn:aws:sns:us-east-1:123456789012:nimbus-ec2-alerts \
-  --execute
-```
+* Used `boto3` to work with AWS.
+* Used UTC-aware datetime values.
+* Checked all enabled AWS regions.
+* Looked for running EC2 instances.
+* Checked whether the instance had a `Name` tag.
+* Checked whether the instance was older than seven days.
+* Used `stop_instances()` to stop the EC2 instance.
 
-## Required IAM permissions
+---
 
-The identity running the script needs, at minimum:
+## What Was Wrong or Incomplete
 
-- `ec2:DescribeRegions`
-- `ec2:DescribeInstances`
-- `ec2:StopInstances`
-- `sns:Publish`
+After reviewing the generated code, I identified several areas that needed improvement:
 
-If the script is run through an automation role, scope `sns:Publish` to the exact SNS topic ARN and scope EC2 actions to the intended accounts/regions where supported.
+1. It stopped instances without sending an SNS notification first.
+2. It did not check whether the SNS notification was successfully sent.
+3. It did not have a dry-run option.
+4. It did not handle AWS API errors.
+5. It did not clearly print what was happening.
+6. It was not safe to test directly because it could stop an instance immediately.
 
-## Safety decisions
+---
 
-- Dry-run is the default.
-- Only `running` instances are considered.
-- The `Name` tag must be absent or empty.
-- The launch time must be older than the configured age threshold.
-- The script publishes the SNS alert before stopping and skips the stop if publish fails.
-- The SNS topic can live in a different region from the EC2 instance.
-- The script reports API failures instead of terminating the entire regional scan.
+## Changes Made in the Final Version
 
-## AI transparency
+I simplified and modified the code so that it is easier to understand and explain.
 
-See `ai_prompt_log.md` for the prompt, raw baseline output, review notes, and final changes. This is intentionally included because the exercise asks the candidate to demonstrate judgment over AI-generated output.
+The final version:
+
+* Checks all enabled AWS regions.
+* Finds running EC2 instances.
+* Checks for a missing `Name` tag.
+* Checks whether the instance is older than seven days.
+* Sends an SNS notification before stopping the instance.
+* Includes a simple `DRY_RUN` setting.
+* Does not stop an instance when dry-run mode is enabled.
+* Prints the instances that are identified as candidates.
+
+I intentionally kept the final code simple instead of adding unnecessary classes, multiple helper functions, complex command-line arguments, or advanced error-handling logic.
+
+---
+
+## What I Learned From the AI Output
+
+The AI was useful for creating the initial structure, but I reviewed the code before using it.
+
+The main lesson was that AI-generated AWS automation code should not be used without checking the actual AWS operations and adding safety controls. In this case, I specifically added the SNS notification and dry-run behavior so that the script does not accidentally stop an EC2 instance during testing.

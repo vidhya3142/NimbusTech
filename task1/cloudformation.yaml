@@ -1,0 +1,251 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: NimbusTech secure two-tier application - CloudFormation
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: nimbustech
+  InstanceType:
+    Type: String
+    Default: t3.micro
+  DBInstanceClass:
+    Type: String
+    Default: db.t3.micro
+  DBUsername:
+    Type: String
+    Default: nimbusadmin
+    NoEcho: true
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id
+
+Resources:
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.20.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags: [{Key: Name, Value: !Sub '${EnvironmentName}-vpc'}]
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+  IGWAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties: {VpcId: !Ref VPC, InternetGatewayId: !Ref InternetGateway}
+
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: 10.20.1.0/24
+      MapPublicIpOnLaunch: true
+      Tags: [{Key: Name, Value: !Sub '${EnvironmentName}-public-a'}]
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: 10.20.2.0/24
+      MapPublicIpOnLaunch: true
+      Tags: [{Key: Name, Value: !Sub '${EnvironmentName}-public-b'}]
+  AppSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: 10.20.11.0/24
+      Tags: [{Key: Name, Value: !Sub '${EnvironmentName}-app-a'}]
+  AppSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: 10.20.12.0/24
+      Tags: [{Key: Name, Value: !Sub '${EnvironmentName}-app-b'}]
+  DBSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: 10.20.21.0/24
+      Tags: [{Key: Name, Value: !Sub '${EnvironmentName}-db-a'}]
+  DBSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: 10.20.22.0/24
+      Tags: [{Key: Name, Value: !Sub '${EnvironmentName}-db-b'}]
+
+  PublicRT:
+    Type: AWS::EC2::RouteTable
+    Properties: {VpcId: !Ref VPC}
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: IGWAttachment
+    Properties: {RouteTableId: !Ref PublicRT, DestinationCidrBlock: 0.0.0.0/0, GatewayId: !Ref InternetGateway}
+  PublicAssocA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: {SubnetId: !Ref PublicSubnetA, RouteTableId: !Ref PublicRT}
+  PublicAssocB:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: {SubnetId: !Ref PublicSubnetB, RouteTableId: !Ref PublicRT}
+
+  NatEIPA:
+    Type: AWS::EC2::EIP
+    DependsOn: IGWAttachment
+    Properties: {Domain: vpc}
+  NatEIPB:
+    Type: AWS::EC2::EIP
+    DependsOn: IGWAttachment
+    Properties: {Domain: vpc}
+  NatA:
+    Type: AWS::EC2::NatGateway
+    Properties: {SubnetId: !Ref PublicSubnetA, AllocationId: !GetAtt NatEIPA.AllocationId}
+  NatB:
+    Type: AWS::EC2::NatGateway
+    Properties: {SubnetId: !Ref PublicSubnetB, AllocationId: !GetAtt NatEIPB.AllocationId}
+
+  AppRTA:
+    Type: AWS::EC2::RouteTable
+    Properties: {VpcId: !Ref VPC}
+  AppRouteA:
+    Type: AWS::EC2::Route
+    Properties: {RouteTableId: !Ref AppRTA, DestinationCidrBlock: 0.0.0.0/0, NatGatewayId: !Ref NatA}
+  AppAssocA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: {SubnetId: !Ref AppSubnetA, RouteTableId: !Ref AppRTA}
+  AppRTB:
+    Type: AWS::EC2::RouteTable
+    Properties: {VpcId: !Ref VPC}
+  AppRouteB:
+    Type: AWS::EC2::Route
+    Properties: {RouteTableId: !Ref AppRTB, DestinationCidrBlock: 0.0.0.0/0, NatGatewayId: !Ref NatB}
+  AppAssocB:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: {SubnetId: !Ref AppSubnetB, RouteTableId: !Ref AppRTB}
+  DBRT:
+    Type: AWS::EC2::RouteTable
+    Properties: {VpcId: !Ref VPC}
+  DBAssocA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: {SubnetId: !Ref DBSubnetA, RouteTableId: !Ref DBRT}
+  DBAssocB:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties: {SubnetId: !Ref DBSubnetB, RouteTableId: !Ref DBRT}
+
+  ALBSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Public ALB HTTP ingress
+      VpcId: !Ref VPC
+      SecurityGroupIngress: [{IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: 0.0.0.0/0}]
+      SecurityGroupEgress: [{IpProtocol: -1, CidrIp: 0.0.0.0/0}]
+  AppSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: App accepts traffic only from ALB
+      VpcId: !Ref VPC
+      SecurityGroupIngress: [{IpProtocol: tcp, FromPort: 3000, ToPort: 3000, SourceSecurityGroupId: !Ref ALBSG}]
+      SecurityGroupEgress: [{IpProtocol: -1, CidrIp: 0.0.0.0/0}]
+  DBSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: PostgreSQL accepts traffic only from app tier
+      VpcId: !Ref VPC
+      SecurityGroupIngress: [{IpProtocol: tcp, FromPort: 5432, ToPort: 5432, SourceSecurityGroupId: !Ref AppSG}]
+      SecurityGroupEgress: [{IpProtocol: -1, CidrIp: 0.0.0.0/0}]
+
+  AppRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement: [{Effect: Allow, Principal: {Service: ec2.amazonaws.com}, Action: sts:AssumeRole}]
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+  AppProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties: {Roles: [!Ref AppRole]}
+
+  LaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        ImageId: !Ref LatestAmiId
+        InstanceType: !Ref InstanceType
+        IamInstanceProfile: {Name: !Ref AppProfile}
+        SecurityGroupIds: [!Ref AppSG]
+        MetadataOptions: {HttpEndpoint: enabled, HttpTokens: required}
+        UserData:
+          Fn::Base64: |
+            #!/bin/bash
+            set -eux
+            apt-get update
+            apt-get install -y nodejs npm
+            # Deploy the Node.js REST API here.
+            # Administration is through SSM Session Manager; SSH is intentionally disabled.
+
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref VPC
+      Port: 3000
+      Protocol: HTTP
+      TargetType: instance
+      HealthCheckPath: /health
+  ALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Scheme: internet-facing
+      Subnets: [!Ref PublicSubnetA, !Ref PublicSubnetB]
+      SecurityGroups: [!Ref ALBSG]
+  Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ALB
+      Port: 80
+      Protocol: HTTP
+      DefaultActions: [{Type: forward, TargetGroupArn: !Ref TargetGroup}]
+  ASG:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      MinSize: '2'
+      MaxSize: '4'
+      DesiredCapacity: '2'
+      VPCZoneIdentifier: [!Ref AppSubnetA, !Ref AppSubnetB]
+      TargetGroupARNs: [!Ref TargetGroup]
+      LaunchTemplate: {LaunchTemplateId: !Ref LaunchTemplate, Version: !GetAtt LaunchTemplate.LatestVersionNumber}
+
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Private database subnets
+      SubnetIds: [!Ref DBSubnetA, !Ref DBSubnetB]
+  Database:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      Engine: postgres
+      EngineVersion: '17'
+      DBInstanceClass: !Ref DBInstanceClass
+      AllocatedStorage: 20
+      StorageType: gp3
+      DBName: nimbus
+      MasterUsername: !Ref DBUsername
+      ManageMasterUserPassword: true
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      VPCSecurityGroups: [!Ref DBSG]
+      PubliclyAccessible: false
+      MultiAZ: true
+      BackupRetentionPeriod: 7
+      StorageEncrypted: true
+
+Outputs:
+  VPCId: {Value: !Ref VPC}
+  ALBDNSName: {Value: !GetAtt ALB.DNSName}
+  DBEndpoint: {Value: !GetAtt Database.Endpoint.Address}
