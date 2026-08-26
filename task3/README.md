@@ -1,19 +1,25 @@
 # Task 3 — Security Audit & Remediation
 
-The source exercise gives six findings. Severity below is my judgment based on likely exploitability and blast radius; a real client engagement would map them to the client's risk matrix and business impact.
+The source exercise provides six security findings. The severity below is my judgment based on the likely exploitability and impact. In a real client engagement, I would also consider the client's risk matrix and business impact.
 
-| Finding | Severity | Remediation | Closure evidence |
-|---|---|---|---|
-| RDS publicly accessible | Critical | Set `PubliclyAccessible=false`, move into private DB subnets, restrict SG ingress to app SG only. | RDS attribute + SG review + connectivity test from app subnet. |
-| EC2 SG allows `0.0.0.0/0:22` | Critical | Remove SSH internet ingress. Use SSM Session Manager. If emergency SSH is unavoidable, use a tightly controlled bastion/VPN/source CIDR and temporary rule. | SG diff + SSM connectivity test. |
-| S3 `nimbus-uploads` public ACLs | High | Enable Bucket Owner Enforced Object Ownership, remove public ACLs, block all public access. Review bucket policy separately. | `get-public-access-block`, ownership controls, policy review. |
-| `deploy-user` has AdministratorAccess | Critical | Remove AdministratorAccess. Prefer short-lived role assumption from CI/CD. Apply a task-scoped policy after inventorying actual deployment actions. | IAM policy inventory + successful least-privilege deployment. |
-| CloudTrail not enabled in `us-east-1` | High | Create a multi-region trail, log file validation, encrypt/log to a dedicated bucket, and enable management events. | Trail status + S3 log delivery + Security Hub evidence. |
-| Ubuntu host has 14 Critical CVEs | Critical | Patch fleet through SSM, reboot when required, verify package/kernel versions, then rescan with Inspector. | SSM command result + package/kernel verification + Inspector closure. |
+## Security Findings
 
-## Remediation commands / code
+| Finding                                          | Severity | Remediation                                                                                                                           | Closure Evidence                                                                             |
+| ------------------------------------------------ | -------- | ------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| RDS publicly accessible                          | Critical | Set `PubliclyAccessible=false`, move RDS into private DB subnets, and allow database access only from the application security group. | RDS configuration, security group review, and connectivity test from the application subnet. |
+| EC2 security group allows `0.0.0.0/0` on port 22 | Critical | Remove public SSH access. Use AWS Systems Manager Session Manager instead.                                                            | Security group review and successful SSM connection.                                         |
+| S3 `nimbus-uploads` has public ACLs              | High     | Block public access, disable ACL-based access using Bucket Owner Enforced ownership, and review the bucket policy.                    | S3 Public Access Block and ownership settings.                                               |
+| `deploy-user` has AdministratorAccess            | Critical | Remove AdministratorAccess and use a least-privilege deployment role.                                                                 | IAM policy review and successful deployment using the new role.                              |
+| CloudTrail is not enabled in `us-east-1`         | High     | Enable a multi-region CloudTrail trail and store logs in a dedicated S3 bucket.                                                       | CloudTrail status and S3 log delivery verification.                                          |
+| Ubuntu EC2 has 14 Critical CVEs                  | Critical | Patch the EC2 instances using SSM Run Command, reboot if required, and verify the kernel and OpenSSL versions.                        | SSM command result, kernel/OpenSSL verification, and Inspector rescan.                       |
 
-### A. RDS public exposure
+---
+
+# Remediation
+
+## A. RDS Public Access
+
+The immediate fix is to make the RDS instance private:
 
 ```bash
 aws rds modify-db-instance \
@@ -22,12 +28,24 @@ aws rds modify-db-instance \
   --apply-immediately
 ```
 
-This command is only the immediate fix. The durable fix is the Task 1 private subnet + dedicated DB security group design.
+This is only the immediate fix.
 
-### B. Remove SSH from EC2 SG
+The permanent solution is the architecture from **Task 1**, where RDS is placed in private database subnets and the database security group allows PostgreSQL traffic only from the application security group.
+
+---
+
+## B. Remove Public SSH Access
+
+First check the security group:
 
 ```bash
-aws ec2 describe-security-groups --group-ids sg-EXAMPLE
+aws ec2 describe-security-groups \
+  --group-ids sg-EXAMPLE
+```
+
+Remove the public SSH rule:
+
+```bash
 aws ec2 revoke-security-group-ingress \
   --group-id sg-EXAMPLE \
   --protocol tcp \
@@ -35,33 +53,52 @@ aws ec2 revoke-security-group-ingress \
   --cidr 0.0.0.0/0
 ```
 
-Use the actual security-group ID after confirming the rule. Do not blindly revoke rules from an unknown SG.
+The actual security group ID should be used after confirming the affected resource.
 
-### C. S3 public ACLs
+For normal administration, I would use **AWS Systems Manager Session Manager** instead of SSH.
+
+---
+
+## C. Secure S3 Bucket
+
+Block public access:
 
 ```bash
 aws s3api put-public-access-block \
   --bucket nimbus-uploads \
   --public-access-block-configuration \
   BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
+```
 
+Enable Bucket Owner Enforced ownership:
+
+```bash
 aws s3api put-bucket-ownership-controls \
   --bucket nimbus-uploads \
   --ownership-controls 'Rules=[{ObjectOwnership=BucketOwnerEnforced}]'
 ```
 
-Review the bucket policy and any CloudFront/application access pattern before removing a legitimate public use case.
+I would also review the bucket policy before making further changes to make sure there is no legitimate application requirement for public access.
 
-### D. Remove AdministratorAccess
+---
 
-First inventory the user's policies:
+## D. Remove AdministratorAccess
+
+First check the policies attached to the user:
 
 ```bash
-aws iam list-attached-user-policies --user-name deploy-user
-aws iam list-user-policies --user-name deploy-user
+aws iam list-attached-user-policies \
+  --user-name deploy-user
 ```
 
-Then detach the AWS managed administrator policy if that is the finding:
+Also check inline policies:
+
+```bash
+aws iam list-user-policies \
+  --user-name deploy-user
+```
+
+If the finding is caused by the AWS managed `AdministratorAccess` policy, remove it:
 
 ```bash
 aws iam detach-user-policy \
@@ -69,37 +106,225 @@ aws iam detach-user-policy \
   --policy-arn arn:aws:iam::aws:policy/AdministratorAccess
 ```
 
-Do not immediately replace it with another broad managed policy. Create a deployment role with only the actions actually required by the pipeline. The preferred end state is CI/CD -> `sts:AssumeRole` -> deployment role, with no long-lived IAM user credentials.
+I would not replace it with another administrator-level policy.
 
-### E. CloudTrail
+The preferred design is:
 
-`cloudtrail.tf` creates a dedicated log bucket, bucket policy, and multi-region trail. It is intentionally separate from application storage.
-
-```bash
-cd cloudtrail
-terraform init
-terraform plan
-terraform apply
+```text
+CI/CD Pipeline
+      |
+      v
+STS AssumeRole
+      |
+      v
+Least-Privilege Deployment Role
+      |
+      v
+AWS Resources
 ```
 
-### F. CVE patching
+The deployment role should contain only the permissions required by the application deployment process.
 
-`patch_fleet.py` uses SSM Run Command, waits for completion, then verifies the running kernel and OpenSSL package. It supports targeting by tag or explicit instance IDs.
+---
 
-Example:
+## E. Enable CloudTrail
 
-```bash
-python3 patch_fleet.py \
-  --region us-east-1 \
-  --tag-key Environment \
-  --tag-value prod \
-  --min-age-days 0 \
-  --reboot \
-  --execute
+The CloudFormation template is located at:
+
+```text
+cloudtrail/cloudtrail.yaml
 ```
 
-Start without `--execute` to preview targets. Use a maintenance window/change ticket for production.
+It creates:
 
-## Tracking to closure
+* A dedicated S3 bucket for CloudTrail logs
+* S3 bucket policy for CloudTrail
+* A multi-region CloudTrail trail
+* Management event logging
+* Log file validation
 
-For a client, I would maintain one finding record per issue with: finding ID, resource ID, severity, owner, remediation action, due date/SLA, change ticket, evidence link, validation result, and closure date. Findings remain open until an independent check (Security Hub/Inspector/configuration query or test) confirms the control is fixed. Exceptions require an owner, business justification, compensating control, expiry date, and approval.
+Validate the template:
+
+```bash
+aws cloudformation validate-template \
+  --template-body file://cloudtrail/cloudtrail.yaml
+```
+
+Deploy it:
+
+```bash
+aws cloudformation deploy \
+  --template-file cloudtrail/cloudtrail.yaml \
+  --stack-name nimbustech-cloudtrail \
+  --capabilities CAPABILITY_IAM
+```
+
+After deployment, verify the trail:
+
+```bash
+aws cloudtrail describe-trails
+```
+
+Then check that logging is enabled:
+
+```bash
+aws cloudtrail get-trail-status \
+  --name nimbustech-cloudtrail
+```
+
+---
+
+# F. Patch Critical Ubuntu CVEs
+
+The script:
+
+```text
+patch_ec2.py
+```
+
+uses AWS Systems Manager Run Command to patch Ubuntu EC2 instances.
+
+The basic flow is:
+
+```text
+Find running EC2 instances
+        |
+        v
+Find instances without Name tag
+        |
+        v
+Send SSM Run Command
+        |
+        v
+apt update + upgrade
+        |
+        v
+Update OpenSSL
+        |
+        v
+Check command status
+        |
+        v
+Verify kernel + OpenSSL
+```
+
+Run the script:
+
+```bash
+python3 patch_ec2.py
+```
+
+The script updates:
+
+```bash
+sudo apt-get update
+sudo apt-get -y upgrade
+sudo apt-get -y install --only-upgrade openssl
+```
+
+It then verifies:
+
+```bash
+uname -r
+openssl version
+```
+
+For production, I would run this during an approved maintenance window and perform an AWS Inspector rescan after patching.
+
+---
+
+# Required AWS Permissions
+
+The person running the patching script needs permissions for:
+
+* `ec2:DescribeInstances`
+* `ssm:SendCommand`
+* `ssm:ListCommandInvocations`
+
+The EC2 instances also need to be managed by **AWS Systems Manager** and have the appropriate SSM IAM role attached.
+
+---
+
+# Testing the Patch
+
+After the patch command finishes, the script checks the SSM command status.
+
+A successful result looks like:
+
+```text
+i-0123456789abcdef0 : Success
+Patch completed successfully
+```
+
+It then runs another SSM command to display:
+
+```text
+Kernel:
+6.x.x-...
+
+OpenSSL:
+OpenSSL 3.x.x ...
+```
+
+For the final security validation, I would run AWS Inspector again and confirm that the Critical CVEs have been resolved.
+
+---
+
+# Tracking Findings to Closure
+
+For a client, I would maintain one finding record for each security issue.
+
+The tracking record would contain:
+
+* Finding ID
+* Resource ID
+* Severity
+* Finding description
+* Owner
+* Remediation action
+* Due date
+* Change ticket
+* Evidence
+* Validation result
+* Closure date
+
+A finding should remain **open** until there is evidence that the issue has been fixed.
+
+For example:
+
+```text
+Finding
+   |
+Assign owner
+    |
+Create remediation ticket
+    |
+Apply fix
+    |
+Validate fix
+    |
+Collect evidence
+    |
+Security Hub / Inspector rescan
+   |
+Close finding
+```
+
+If a finding cannot be fixed immediately, I would document the exception with:
+
+* Business justification
+* Compensating control
+* Risk owner
+* Approval
+* Expiration/review date
+
+---
+
+# Assumptions
+
+* The EC2 instances are Ubuntu and are managed by AWS Systems Manager.
+* The RDS database is PostgreSQL.
+* The affected S3 bucket is `nimbus-uploads`.
+* The affected IAM user is `deploy-user`.
+* The environment is primarily deployed in `us-east-1`.
+* Production changes should be tested in a non-production environment first.

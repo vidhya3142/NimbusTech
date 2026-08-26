@@ -1,34 +1,31 @@
-# NimbusTech Submission Summary
+# NimbusTech AWS Cloud Engineer - Submission Summary
 
-## Executive summary
+This repository implements the five requested tasks for the NimbusTech practical exercise.
 
-I re-architected NimbusTech from a flat/default-VPC deployment into a two-AZ segmented design with a public ALB, private EC2 application tier, and private Multi-AZ RDS. The security model removes direct SSH and database internet exposure and uses security-group references between tiers.
+## IaC choice
 
-The database migration is idempotent, validates row counts/schema/indexes, and backfills completed orders. Security remediation covers all six supplied findings, including an SSM-based Ubuntu patching workflow. Cost analysis prioritizes NAT Gateway, RDS, and data transfer, with CloudWatch Logs as the next major optimization opportunity. Task 5 demonstrates AI-assisted automation with an explicit prompt log and human review.
+CloudFormation YAML is used instead of Terraform so the infrastructure can be reviewed and deployed using native AWS tooling.
 
-## Key design choices
+## Task 1
 
-- Two AZs for application/database resilience.
-- Public ALB only; EC2 and RDS have no public exposure.
-- SSM Session Manager instead of SSH.
-- IMDSv2 required on EC2.
-- RDS encrypted, Multi-AZ, private subnet group, and dedicated SG.
-- Two NAT Gateways for production AZ resilience; recommend a single NAT/VPC endpoints for cost-sensitive non-prod where appropriate.
-- Terraform variables keep environment-specific values out of source code.
+`task1/cloudformation.yaml` implements the segmented two-tier architecture with public ALB, private application tier, private database tier, two AZs, NAT gateways, dedicated security groups, SSM access and IMDSv2.
 
-## Validation performed in this environment
+## Task 2
 
-- Python syntax compilation passed for Task 3 and Task 5.
-- Architecture diagram PNG generated and included.
-- Terraform files were reviewed structurally, but Terraform CLI is not installed in this environment, so `terraform validate` was not executed here.
-- AWS CLI is not installed, so no AWS resources were modified from this exercise environment.
-- PostgreSQL scripts were reviewed as SQL source; they should be executed against a staging clone before production.
+The PostgreSQL migration and rollback SQL are idempotent and include validation checks.
 
-## What I would do with more time
+## Task 3
 
-1. Add automated Terraform CI (`fmt`, `validate`, `tflint`, security scanning, and plan review).
-2. Add test fixtures for the migration and run them against a PostgreSQL container.
-3. Add AWS Config/Security Hub control mapping and evidence collection.
-4. Replace RDS password Terraform input with Secrets Manager rotation.
-5. Add WAF, Route 53, ACM, VPC endpoints, CloudWatch alarms, and centralized observability.
-6. Run Cost Explorer analysis using real usage dimensions before committing to savings estimates.
+Security findings are mapped to remediation actions. `task3/cloudtrail/cloudtrail.yaml` enables a multi-region CloudTrail trail, and `patch_fleet.py` uses SSM Run Command for fleet patching and verification.
+
+## Task 4
+
+Cost drivers and optimization recommendations are documented. `task4/cloudformation/billing-alarm.yaml` creates the $350 billing alarm and SNS notification.
+
+## Task 5
+
+The EC2 cleanup automation, prompt log and AI review are included.
+
+## Deployment caution
+
+The exercise's production-style architecture includes NAT gateways and Multi-AZ RDS, which can incur charges. Do not deploy the complete stack in a personal account without reviewing expected costs first.

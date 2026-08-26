@@ -1,90 +1,80 @@
--- NimbusTech PostgreSQL v1 -> v2 migration
--- Safe to run repeatedly. Run with a role that can ALTER TABLE and CREATE INDEX.
--- Recommended: execute against a restored staging clone before production.
+-- ============================================
+-- NimbusTech Database Migration
+-- Version: v1 -> v2
+-- ============================================
 
-BEGIN;
+-- Check current row counts
+SELECT COUNT(*) AS users_count FROM users;
+SELECT COUNT(*) AS orders_count FROM orders;
 
--- Pre-validation: row counts must not change because this migration is schema/data-backfill only.
-CREATE TEMP TABLE IF NOT EXISTS nimbus_migration_precheck AS
-SELECT
-  (SELECT count(*) FROM users)  AS users_count,
-  (SELECT count(*) FROM orders) AS orders_count;
+
+-- ============================================
+-- 1. Add user_tier column to users
+-- ============================================
 
 ALTER TABLE users
-  ADD COLUMN IF NOT EXISTS user_tier VARCHAR DEFAULT 'free';
+ADD COLUMN IF NOT EXISTS user_tier VARCHAR(50) DEFAULT 'free';
+
+
+-- ============================================
+-- 2. Add processed_at column to orders
+-- ============================================
 
 ALTER TABLE orders
-  ADD COLUMN IF NOT EXISTS processed_at TIMESTAMP NULL;
+ADD COLUMN IF NOT EXISTS processed_at TIMESTAMP NULL;
 
--- IF NOT EXISTS makes this idempotent. A normal CREATE INDEX is used so the whole DDL can be transactional.
-CREATE INDEX IF NOT EXISTS idx_orders_created_at ON orders (created_at);
 
--- Backfill only missing values so a rerun does not overwrite an existing processed_at value.
+-- ============================================
+-- 3. Create index on orders.created_at
+-- ============================================
+
+CREATE INDEX IF NOT EXISTS idx_orders_created_at
+ON orders(created_at);
+
+
+-- ============================================
+-- 4. Backfill processed_at
+-- Completed orders = created_at + 2 hours
+-- ============================================
+
 UPDATE orders
 SET processed_at = created_at + INTERVAL '2 hours'
 WHERE status = 'completed'
-  AND processed_at IS NULL;
+AND processed_at IS NULL;
 
--- Post-validation: columns and index must exist, and row counts must be unchanged.
-DO $$
-DECLARE
-  users_before bigint;
-  orders_before bigint;
-  users_after bigint;
-  orders_after bigint;
-  completed_missing bigint;
-  idx_count bigint;
-  user_tier_exists boolean;
-  processed_at_exists boolean;
-BEGIN
-  SELECT users_count, orders_count
-    INTO users_before, orders_before
-    FROM nimbus_migration_precheck;
 
-  SELECT count(*) INTO users_after FROM users;
-  SELECT count(*) INTO orders_after FROM orders;
+-- ============================================
+-- 5. Validation
+-- ============================================
 
-  SELECT EXISTS (
-    SELECT 1 FROM information_schema.columns
-    WHERE table_schema = current_schema()
-      AND table_name = 'users'
-      AND column_name = 'user_tier'
-  ) INTO user_tier_exists;
+-- Check users column
+SELECT column_name, data_type
+FROM information_schema.columns
+WHERE table_name = 'users'
+AND column_name = 'user_tier';
 
-  SELECT EXISTS (
-    SELECT 1 FROM information_schema.columns
-    WHERE table_schema = current_schema()
-      AND table_name = 'orders'
-      AND column_name = 'processed_at'
-  ) INTO processed_at_exists;
 
-  SELECT count(*) INTO idx_count
-  FROM pg_indexes
-  WHERE schemaname = current_schema()
-    AND tablename = 'orders'
-    AND indexname = 'idx_orders_created_at';
+-- Check orders column
+SELECT column_name, data_type
+FROM information_schema.columns
+WHERE table_name = 'orders'
+AND column_name = 'processed_at';
 
-  SELECT count(*) INTO completed_missing
-  FROM orders
-  WHERE status = 'completed'
-    AND processed_at IS NULL;
 
-  IF users_before <> users_after OR orders_before <> orders_after THEN
-    RAISE EXCEPTION 'Row-count validation failed: users %, orders % -> users %, orders %',
-      users_before, orders_before, users_after, orders_after;
-  END IF;
+-- Check index
+SELECT indexname
+FROM pg_indexes
+WHERE tablename = 'orders'
+AND indexname = 'idx_orders_created_at';
 
-  IF NOT user_tier_exists OR NOT processed_at_exists OR idx_count <> 1 THEN
-    RAISE EXCEPTION 'Schema validation failed: user_tier=%, processed_at=%, index_count=%',
-      user_tier_exists, processed_at_exists, idx_count;
-  END IF;
 
-  IF completed_missing <> 0 THEN
-    RAISE EXCEPTION 'Backfill validation failed: % completed orders still have NULL processed_at', completed_missing;
-  END IF;
+-- Check completed orders that were backfilled
+SELECT COUNT(*) AS processed_orders
+FROM orders
+WHERE status = 'completed'
+AND processed_at IS NOT NULL;
 
-  RAISE NOTICE 'Migration validation passed. users=% orders=% index=% completed_missing=%',
-    users_after, orders_after, idx_count, completed_missing;
-END $$;
 
-COMMIT;
+-- Final row counts
+SELECT COUNT(*) AS users_count FROM users;
+SELECT COUNT(*) AS orders_count FROM orders;

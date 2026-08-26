@@ -1,0 +1,319 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: NimbusTech secure 2-tier infrastructure using CloudFormation
+
+Parameters:
+  DBName:
+    Type: String
+    Default: nimbusdb
+  DBUsername:
+    Type: String
+    Default: nimbusadmin
+  DBPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 8
+
+Resources:
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: nimbustech-vpc
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: 10.0.1.0/24
+      MapPublicIpOnLaunch: true
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: 10.0.2.0/24
+      MapPublicIpOnLaunch: true
+
+  PrivateAppSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: 10.0.11.0/24
+
+  PrivateAppSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: 10.0.12.0/24
+
+  PrivateDBSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: 10.0.21.0/24
+
+  PrivateDBSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: 10.0.22.0/24
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicRoute1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicRoute2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+
+  NatEIP:
+    Type: AWS::EC2::EIP
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      Domain: vpc
+
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatEIP.AllocationId
+      SubnetId: !Ref PublicSubnet1
+
+  PrivateAppRouteTable1:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+
+  PrivateAppRoute1:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateAppRouteTable1
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+
+  PrivateAppAssoc1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateAppSubnet1
+      RouteTableId: !Ref PrivateAppRouteTable1
+
+  PrivateAppRouteTable2:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+
+  PrivateAppRoute2:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateAppRouteTable2
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+
+  PrivateAppAssoc2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateAppSubnet2
+      RouteTableId: !Ref PrivateAppRouteTable2
+
+  PrivateDBRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+
+  PrivateDBAssoc1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateDBSubnet1
+      RouteTableId: !Ref PrivateDBRouteTable
+
+  PrivateDBAssoc2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateDBSubnet2
+      RouteTableId: !Ref PrivateDBRouteTable
+
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Public ALB HTTP and HTTPS
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+
+  AppSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Application traffic only from ALB
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3000
+          ToPort: 3000
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+
+  DatabaseSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: PostgreSQL traffic only from application tier
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !Ref AppSecurityGroup
+
+  AppRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  AppInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref AppRole
+
+  AppLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        ImageId: '{{resolve:ssm:/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id}}'
+        InstanceType: t3.micro
+        IamInstanceProfile:
+          Name: !Ref AppInstanceProfile
+        SecurityGroupIds:
+          - !Ref AppSecurityGroup
+        MetadataOptions:
+          HttpTokens: required
+
+  AppTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref VPC
+      Port: 3000
+      Protocol: HTTP
+      TargetType: instance
+      HealthCheckPath: /
+
+  AppAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      MinSize: 2
+      MaxSize: 2
+      DesiredCapacity: 2
+      VPCZoneIdentifier:
+        - !Ref PrivateAppSubnet1
+        - !Ref PrivateAppSubnet2
+      LaunchTemplate:
+        LaunchTemplateId: !Ref AppLaunchTemplate
+        Version: !GetAtt AppLaunchTemplate.LatestVersionNumber
+      TargetGroupARNs:
+        - !Ref AppTargetGroup
+
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Scheme: internet-facing
+      Type: application
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+      Subnets:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref AppTargetGroup
+
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Private database subnets
+      SubnetIds:
+        - !Ref PrivateDBSubnet1
+        - !Ref PrivateDBSubnet2
+
+  Database:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      DBName: !Ref DBName
+      Engine: postgres
+      EngineVersion: '18'
+      DBInstanceClass: db.t3.medium
+      AllocatedStorage: 20
+      StorageType: gp3
+      MultiAZ: true
+      PubliclyAccessible: false
+      MasterUsername: !Ref DBUsername
+      MasterUserPassword: !Ref DBPassword
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      VPCSecurityGroups:
+        - !Ref DatabaseSecurityGroup
+      BackupRetentionPeriod: 7
+      StorageEncrypted: true
+
+Outputs:
+  VPC:
+    Value: !Ref VPC
+  ALBDNS:
+    Value: !GetAtt ApplicationLoadBalancer.DNSName
+  RDSEndpoint:
+    Value: !GetAtt Database.Endpoint.Address
