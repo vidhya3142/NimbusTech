@@ -1,51 +1,34 @@
 # Task 1 — Infrastructure Architecture & IaC
 
+This task is implemented using **AWS CloudFormation YAML**, not CloudFormation.
+
+## Files
+- `cloudformation.yaml` — complete VPC, subnets, routes, NAT, ALB, private EC2 Auto Scaling Group, security groups and private Multi-AZ RDS.
+- `SECURITY_GROUPS.md` — least-privilege rule explanation.
+- `diagram/architecture.png` — architecture diagram.
+- `diagram/architecture.mmd` — diagram source.
+
 ## Design
+- Public subnets: ALB only.
+- Private application subnets: EC2 Auto Scaling Group across two AZs.
+- Private database subnets: RDS across two AZs.
+- No public IPs on application/database resources.
+- No SSH access; SSM Session Manager is used instead.
+- IMDSv2 is required.
+- NAT Gateway per AZ avoids a single-AZ NAT dependency.
 
-The target architecture separates internet-facing and internal workloads:
-
-- Two public subnets across two AZs contain the ALB and NAT Gateways.
-- Two private application subnets contain an Auto Scaling Group of EC2 instances.
-- Two isolated database subnets contain Multi-AZ RDS PostgreSQL.
-- Internet Gateway provides ingress/egress for public resources.
-- Each application subnet routes outbound traffic through the NAT Gateway in the same AZ.
-- The DB route tables have no default route to the internet.
-- EC2 uses SSM instead of SSH; IMDSv2 is required.
-
-## Security-group rules
-
-| SG | Direction | Source/Destination | Port | Reason |
-|---|---|---|---:|---|
-| ALB | Ingress | `0.0.0.0/0` | 80 | Public HTTP entry point. |
-| ALB | Ingress | `0.0.0.0/0` | 443 | Public HTTPS entry point. |
-| ALB | Egress | App SG | 3000 | Forward API traffic only to app tier. |
-| App | Ingress | ALB SG | 3000 | Prevent direct internet access to EC2. |
-| App | Egress | Internet via NAT | All | Updates/external API access; tighten with VPC endpoints and egress proxy where practical. |
-| RDS | Ingress | App SG | 5432 | Only application tier can reach PostgreSQL. |
-| RDS | Egress | Default | All | Return traffic; can be further constrained if the workload permits. |
-
-There is deliberately no SSH ingress rule.
-
-## Apply
+## Validate and deploy
 
 ```bash
-cp terraform.tfvars.example terraform.tfvars
-# Set db_password through a secure mechanism for your lab.
-terraform init
-terraform fmt -recursive
-terraform validate
-terraform plan
-terraform apply
+aws cloudformation validate-template \
+  --template-body file://task1/cloudformation.yaml
+
+aws cloudformation deploy \
+  --template-file task1/cloudformation.yaml \
+  --stack-name nimbustech-network \
+  --capabilities CAPABILITY_IAM
 ```
 
-Before applying, verify that PostgreSQL 18 is available in the selected region/provider version. The exercise asks for PostgreSQL 18, so the version is a variable rather than silently changing the requirement.
+**Cost warning:** NAT Gateways and Multi-AZ RDS can create charges and are not free-tier resources. For this hiring exercise, review the template rather than deploying it blindly in a personal account.
 
-## Production improvements with more time
-
-- Store DB credentials in Secrets Manager with rotation.
-- Add VPC endpoints for SSM, CloudWatch, S3 and other AWS APIs to reduce NAT dependence.
-- Add AWS WAF to the ALB.
-- Add Route 53 + ACM for a real hostname/HTTPS.
-- Add CloudWatch alarms, centralized logs, and application tracing.
-- Use a hardened application AMI and CI/CD instead of a placeholder user-data script.
-- Consider RDS Proxy for connection management if the application has bursty connection behavior.
+**PostgreSQL version:** the scenario mentions PostgreSQL 18. The template uses PostgreSQL 17 as a conservative example. Before deployment, verify the supported engine version in the selected AWS region and update `EngineVersion` accordingly.
