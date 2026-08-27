@@ -1,0 +1,38 @@
+NimbusTech - Target Architecture (us-east-1)
+=============================================
+
+                                   Internet
+                                       |
+                                 [Internet GW]
+                                       |
+        ================== VPC 10.0.0.0/16 ==================
+        |                                                    |
+        |   AZ-a                              AZ-b           |
+        |  -------------------------------  ----------------  |
+        |  Public subnet 10.0.1.0/24       Public 10.0.2.0/24 |
+        |  [NAT GW]      \                 /                  |
+        |                 \---[ ALB ]-----/                   |
+        |                    (SG: 80 from 0.0.0.0/0)          |
+        |                       |          |                  |
+        |                       v          v                  |
+        |  App subnet 10.0.11.0/24    App subnet 10.0.12.0/24 |
+        |  [EC2 - ASG, node API]      [EC2 - ASG, node API]    |
+        |  (SG: AppPort from ALB-SG only, no public IP)        |
+        |                       |          |                  |
+        |                       v          v                  |
+        |  DB subnet 10.0.21.0/24     DB subnet 10.0.22.0/24  |
+        |  [RDS Postgres - primary]   [standby, if Multi-AZ]   |
+        |  (SG: 5432 from App-SG only, PubliclyAccessible=false)|
+        |  (route table has NO route to internet/IGW)          |
+        =======================================================
+
+Notes:
+- Only the ALB security group accepts traffic from 0.0.0.0/0 (port 80).
+- App tier has no public IP and no inbound rule except from the ALB SG.
+  Management is via SSM Session Manager (IAM role), not SSH - so no port 22
+  is open anywhere in the VPC.
+- DB tier is in its own subnets with a route table that has no path to the
+  internet at all (not just "blocked by SG" - there's no route to reach it).
+- Single NAT Gateway by default (cost trade-off, see README). Both app
+  subnets have their own route table so it's a one-line change to give
+  AZ-b its own NAT if you want full AZ independence.
