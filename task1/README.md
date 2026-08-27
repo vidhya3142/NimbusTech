@@ -1,6 +1,4 @@
-# NimbusTech - Task 1: Segmented Infrastructure
-
-## What this is
+# NimbusTech - Task 1: Infrastructure Architecture & IaC
 
 CloudFormation (YAML) for a re-architected version of NimbusTech's stack:
 ALB in public subnets, app tier (EC2 in an Auto Scaling Group) in private
@@ -8,30 +6,19 @@ subnets, RDS Postgres in its own private subnets that have no route to the
 internet at all. No public IPs anywhere except the ALB.
 
 Files:
-- `cloudformation/nimbustech-infra.yaml` - the whole stack, one template
+- `nimbustech-infra.yaml` - the whole stack, one template
 - `diagram/architecture.txt` - ASCII diagram of the design
+- `nimbus_tech_architecture_diagram.png` - draw.io diagram of the design
 - `README.md` - this file
-
-Validated with `cfn-lint` (see "How I checked this" below).
-
-## Why one template instead of nested stacks
-
-For a 2-tier app this size, one template is easier to read top to bottom and
-easier to review in a PR - which matters more here than the theoretical
-reusability of nested stacks. I split it into clearly commented sections
-(Networking / Security Groups / IAM / Load Balancer / App Tier / Database)
-so it reads like a runbook. If NimbusTech grows into multiple environments
-or services, I'd split networking into its own stack and export the subnet
-IDs/SG IDs for the app stacks to import.
 
 ## Design decisions and why
 
-**Three subnet tiers, not two.** Public (ALB), private-app (EC2), and
-private-db (RDS) are separate subnets with separate route tables. The DB
-subnets' route table has no route to an Internet Gateway or NAT Gateway at
-all - so even if a security group rule were ever misconfigured, there's
-still no network path from the internet to the database. That's a stronger
-guarantee than "the security group blocks it."
+Public (ALB), private-app (EC2), andprivate-db (RDS) are separate subnets 
+with separate route tables. The DB subnets' route table has no route to 
+an Internet Gateway or NAT Gateway atall - so even if a security group 
+rule were ever misconfigured, there's still no network path from the 
+internet to the database. That's a stronger guarantee than "the security 
+group blocks it."
 
 **No SSH, no bastion host.** The app instances get an IAM instance profile
 with `AmazonSSMManagedInstanceCore` and are managed through SSM Session
@@ -58,7 +45,7 @@ like a single instance (no cost increase), but it can absorb an instance or
 AZ failure automatically, and it's the natural place to add a scaling policy
 later without re-architecting.
 
-**Single NAT Gateway by default, not two.** This is the one place I
+**Single NAT Gateway by default** This is the one place I
 deliberately traded a bit of resilience for cost, called out as a parameter
 (`NumberOfNatGateways`) rather than hidden in the template. A second NAT
 Gateway is about $32-35/month plus data processing charges. With one NAT,
