@@ -56,33 +56,3 @@ for region in regions:
                 ec2.stop_instances(
                     InstanceIds=[instance["InstanceId"]]
                 )
-## What the AI got right
-
-It used boto3 to work with AWS.
-It used UTC-aware datetime values.
-It discovered enabled AWS regions.
-It filtered for running EC2 instances.
-It checked whether the instance had a Name tag.
-It checked whether the instance had been running for more than 7 days.
-It used stop_instances() to stop the matching EC2 instances.
-
-## What was wrong/incomplete
-It did not send an SNS notification before stopping the instance.
-It did not check whether the SNS notification was successfully sent.
-It did not have a dry-run option.
-It did not include useful information such as the region and reason in the SNS notification.
-It did not have basic AWS error handling.
-It could stop an instance immediately if the script was run accidentally.
-It used a simple describe_instances() call instead of a paginator, which may not be suitable for a large number of instances.
-
-## Changes made in the final version
-
-Checks all enabled AWS regions.
-Finds running EC2 instances.
-Checks whether an instance has a Name tag.
-Checks whether the instance is older than 7 days.
-Sends an SNS notification before stopping the instance.
-Uses a simple DRY_RUN setting.
-Does not stop instances when dry-run mode is enabled.
-Prints the instances found during the scan.
-Keeps the code simple so that each step is easy to explain.
