@@ -1,0 +1,561 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  NimbusTech - segmented 2-tier architecture.
+  Public ALB -> private app tier (ASG) -> private DB tier (RDS Postgres).
+  No public IPs anywhere except the ALB. No SSH port open - EC2 is
+  managed through SSM Session Manager instead of a bastion host.
+
+Parameters:
+
+  EnvironmentName:
+    Type: String
+    Default: nimbustech
+    Description: Prefix used for naming/tagging every resource.
+
+  VpcCIDR:
+    Type: String
+    Default: 10.0.0.0/16
+
+  PublicSubnet1CIDR:
+    Type: String
+    Default: 10.0.1.0/24
+  PublicSubnet2CIDR:
+    Type: String
+    Default: 10.0.2.0/24
+
+  AppSubnet1CIDR:
+    Type: String
+    Default: 10.0.11.0/24
+  AppSubnet2CIDR:
+    Type: String
+    Default: 10.0.12.0/24
+
+  DBSubnet1CIDR:
+    Type: String
+    Default: 10.0.21.0/24
+  DBSubnet2CIDR:
+    Type: String
+    Default: 10.0.22.0/24
+
+  AppInstanceType:
+    Type: String
+    Default: t3.medium
+    Description: Kept the same size as the current setup. Right-size later using CloudWatch data.
+
+  AppAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp3/ami-id
+    Description: Always resolves to the latest Ubuntu 22.04 AMI at deploy time - no need to hunt for an AMI ID manually.
+
+  AppPort:
+    Type: Number
+    Default: 3000
+    Description: Port the Node.js REST API listens on.
+
+  DBInstanceClass:
+    Type: String
+    Default: db.t3.medium
+
+  DBEngineVersion:
+    Type: String
+    Default: '16.4'
+    Description: >
+      Using the newest generally-available Postgres engine version on RDS at the time of writing.
+      If "Postgres 18" is GA on RDS by the time this is deployed, bump this value - the rest of
+      the template does not need to change.
+
+  DBName:
+    Type: String
+    Default: nimbustechdb
+
+  DBUsername:
+    Type: String
+    Default: nimbusadmin
+    NoEcho: true
+
+  DBPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 12
+    Description: Pass this in at deploy time (--parameter-overrides). Never commit it to the repo.
+
+  DBMultiAZ:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: >
+      Off by default to control cost (this roughly doubles RDS spend). Turn on once the CTO
+      confirms the uptime requirement justifies it - see README cost section.
+
+  NumberOfNatGateways:
+    Type: String
+    Default: '1'
+    AllowedValues: ['1', '2']
+    Description: >
+      1 NAT Gateway saves ~$32/month vs 2, at the cost of the app tier losing outbound internet
+      (patches, npm installs, etc) if that single AZ has an issue - the app itself stays up since
+      the ALB/ASG span both AZs. See README for the trade-off.
+
+Conditions:
+  UseSecondNat: !Equals [!Ref NumberOfNatGateways, '2']
+
+# ---------------------------------------------------------------------------
+# RESOURCES
+# ---------------------------------------------------------------------------
+Resources:
+
+  # ---------------------------------------------------------------------
+  # NETWORKING - VPC, subnets, IGW, NAT, route tables
+  # ---------------------------------------------------------------------
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCIDR
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-vpc
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-igw
+
+  IGWAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # -- Public subnets (ALB + NAT Gateways live here) --
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PublicSubnet1CIDR
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-public-subnet-1
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PublicSubnet2CIDR
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-public-subnet-2
+
+  # -- Private app subnets (EC2 app tier lives here, no public IPs) --
+  AppSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref AppSubnet1CIDR
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-app-subnet-1
+
+  AppSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref AppSubnet2CIDR
+      AvailabilityZone: !Select [1, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-app-subnet-2
+
+  # -- Private DB subnets (RDS lives here, one layer further from the internet than the app tier) --
+  DBSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref DBSubnet1CIDR
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-db-subnet-1
+
+  DBSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref DBSubnet2CIDR
+      AvailabilityZone: !Select [1, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-db-subnet-2
+
+  # -- NAT Gateway(s): lets the private app subnets reach the internet
+  #    (apt/npm updates, external APIs) without accepting inbound traffic --
+  NatEIP1:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+
+  NatGateway1:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatEIP1.AllocationId
+      SubnetId: !Ref PublicSubnet1
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-nat-1
+
+  NatEIP2:
+    Type: AWS::EC2::EIP
+    Condition: UseSecondNat
+    Properties:
+      Domain: vpc
+
+  NatGateway2:
+    Type: AWS::EC2::NatGateway
+    Condition: UseSecondNat
+    Properties:
+      AllocationId: !GetAtt NatEIP2.AllocationId
+      SubnetId: !Ref PublicSubnet2
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-nat-2
+
+  # -- Route tables --
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-public-rt
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: IGWAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1RTAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnet2RTAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+
+  # App route table(s) - route out through NAT, never a direct IGW route
+  AppRouteTable1:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-app-rt-1
+
+  AppRoute1:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref AppRouteTable1
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway1
+
+  AppSubnet1RTAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref AppSubnet1
+      RouteTableId: !Ref AppRouteTable1
+
+  AppRouteTable2:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-app-rt-2
+
+  AppRoute2:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref AppRouteTable2
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !If [UseSecondNat, !Ref NatGateway2, !Ref NatGateway1]
+
+  AppSubnet2RTAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref AppSubnet2
+      RouteTableId: !Ref AppRouteTable2
+
+  # DB route table - deliberately has NO route to the internet (no IGW, no NAT).
+  # The DB tier only ever needs to talk to the app tier inside the VPC.
+  DBRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-db-rt
+
+  DBSubnet1RTAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref DBSubnet1
+      RouteTableId: !Ref DBRouteTable
+
+  DBSubnet2RTAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref DBSubnet2
+      RouteTableId: !Ref DBRouteTable
+
+  # ---------------------------------------------------------------------
+  # SECURITY GROUPS - least privilege, each rule commented with why it exists
+  # ---------------------------------------------------------------------
+
+  # Note on structure: the ALB SG, App SG and DB SG all reference each other
+  # (ALB -> App -> DB). Defining that as inline ingress/egress on all three
+  # groups creates a circular dependency, so each group only declares its
+  # INGRESS inline, and the matching EGRESS rules are declared as separate
+  # AWS::EC2::SecurityGroupEgress resources further down, once every group
+  # they point to already exists.
+
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: ALB SG - only thing in the whole VPC that accepts traffic from the public internet
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: Public HTTP entry point for the app. Add a 443 rule + ACM cert once a domain/cert is ready.
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-alb-sg
+
+  AppSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: App tier SG - EC2 instances, no public IP, no SSH port open anywhere
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: !Ref AppPort
+          ToPort: !Ref AppPort
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+          Description: Only accept app traffic from the ALB - nothing reaches the app instances directly.
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: Outbound HTTPS via NAT for OS/package updates and any external APIs the app calls.
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-app-sg
+
+  DBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: DB tier SG - RDS, not publicly accessible, only reachable from the app tier
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !Ref AppSecurityGroup
+          Description: Only the app tier can talk to Postgres. Nothing else, not even the ALB.
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-db-sg
+
+  # Egress halves of the ALB->App and App->DB rules (see note above).
+  ALBToAppEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref ALBSecurityGroup
+      IpProtocol: tcp
+      FromPort: !Ref AppPort
+      ToPort: !Ref AppPort
+      DestinationSecurityGroupId: !Ref AppSecurityGroup
+      Description: ALB only needs to forward traffic to the app tier on the app port, nothing else.
+
+  AppToDBEgress:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref AppSecurityGroup
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      DestinationSecurityGroupId: !Ref DBSecurityGroup
+      Description: App needs to reach Postgres, and only Postgres, on the DB tier.
+
+  # ---------------------------------------------------------------------
+  # IAM - lets us manage EC2 via SSM Session Manager instead of SSH,
+  # so we never have to open port 22 to anything.
+  # ---------------------------------------------------------------------
+  AppInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-app-role
+
+  AppInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref AppInstanceRole
+
+  # ---------------------------------------------------------------------
+  # LOAD BALANCER
+  # ---------------------------------------------------------------------
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub ${EnvironmentName}-alb
+      Scheme: internet-facing
+      Type: application
+      Subnets:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+
+  AppTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub ${EnvironmentName}-app-tg
+      Port: !Ref AppPort
+      Protocol: HTTP
+      VpcId: !Ref VPC
+      TargetType: instance
+      HealthCheckPath: /health
+      HealthCheckIntervalSeconds: 30
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref AppTargetGroup
+
+  # ---------------------------------------------------------------------
+  # APP TIER - Launch Template + Auto Scaling Group in the private subnets
+  # ---------------------------------------------------------------------
+  AppLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub ${EnvironmentName}-app-lt
+      LaunchTemplateData:
+        ImageId: !Ref AppAmiId
+        InstanceType: !Ref AppInstanceType
+        IamInstanceProfile:
+          Name: !Ref AppInstanceProfile
+        SecurityGroupIds:
+          - !Ref AppSecurityGroup
+        # No KeyName here on purpose - access is via SSM Session Manager, not SSH keys.
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            # Placeholder bootstrap - replace with your actual deploy step
+            # (pull the app from your artifact store / CodeDeploy / etc, then start it on port ${AppPort})
+            apt-get update -y
+            # e.g. install node, pull app code, systemctl start nimbustech-api
+
+  AppAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: !Sub ${EnvironmentName}-app-asg
+      VPCZoneIdentifier:
+        - !Ref AppSubnet1
+        - !Ref AppSubnet2
+      LaunchTemplate:
+        LaunchTemplateId: !Ref AppLaunchTemplate
+        Version: !GetAtt AppLaunchTemplate.LatestVersionNumber
+      MinSize: '1'
+      MaxSize: '2'
+      DesiredCapacity: '1'
+      TargetGroupARNs:
+        - !Ref AppTargetGroup
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-app-instance
+          PropagateAtLaunch: true
+
+  # ---------------------------------------------------------------------
+  # DATABASE TIER
+  # ---------------------------------------------------------------------
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Private subnets only - no route to the internet
+      SubnetIds:
+        - !Ref DBSubnet1
+        - !Ref DBSubnet2
+
+  Database:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      DBInstanceIdentifier: !Sub ${EnvironmentName}-db
+      Engine: postgres
+      EngineVersion: !Ref DBEngineVersion
+      DBInstanceClass: !Ref DBInstanceClass
+      AllocatedStorage: '20'
+      StorageType: gp3
+      DBName: !Ref DBName
+      MasterUsername: !Ref DBUsername
+      MasterUserPassword: !Ref DBPassword
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      VPCSecurityGroups:
+        - !Ref DBSecurityGroup
+      PubliclyAccessible: false
+      MultiAZ: !Ref DBMultiAZ
+      StorageEncrypted: true
+      BackupRetentionPeriod: 7
+      DeletionProtection: true
+
+# ---------------------------------------------------------------------------
+# OUTPUTS
+# ---------------------------------------------------------------------------
+Outputs:
+  ALBDNSName:
+    Description: Public URL of the app (put this behind a domain name / Route 53 record)
+    Value: !GetAtt ApplicationLoadBalancer.DNSName
+
+  DatabaseEndpoint:
+    Description: RDS endpoint - only reachable from inside the VPC (app tier)
+    Value: !GetAtt Database.Endpoint.Address
+
+  VPCId:
+    Value: !Ref VPC
