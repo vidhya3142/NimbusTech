@@ -234,7 +234,7 @@ Before running the migration in production, I would:
 
 ## Assumptions
 
-* PostgreSQL is being used.
+* SQL is being used.
 * The `users` table already exists.
 * The `orders` table already exists.
 * `orders` contains `created_at` and `status`.
